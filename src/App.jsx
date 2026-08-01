@@ -10,9 +10,9 @@ const MODEL_CONFIGS = {
 };
 
 const MODE_OPTIONS = [
-  { id: 'transparent', name: 'Transparent', icon: '✨' },
-  { id: 'color', name: 'Solid Color', icon: '🎨' },
-  { id: 'blur', name: 'Blurred BG', icon: '💧' }
+  { id: 'transparent', name: 'Transparent', icon: '✨', desc: 'Remove background completely' },
+  { id: 'color', name: 'Solid Color', icon: '🎨', desc: 'Replace background with color' },
+  { id: 'blur', name: 'Blurred BG', icon: '💧', desc: 'Keep original background blurred' }
 ];
 
 function App() {
@@ -24,18 +24,18 @@ function App() {
 
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [status, setStatus] = useState('📸 Ready to upload an image');
+  const [status, setStatus] = useState('📸 Upload an image to get started');
   const [statusType, setStatusType] = useState('info');
   const [isDragging, setIsDragging] = useState(false);
   const [selectedModel, setSelectedModel] = useState('small');
   const [processingTime, setProcessingTime] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
 
-  // Per-model cache state map { small: boolean, medium: boolean, large: boolean }
+  // Storage and Cache State
   const [cachedModels, setCachedModels] = useState({ small: false, medium: false, large: false });
   const [cacheSize, setCacheSize] = useState(0);
 
-  // Output Mode State
+  // Output Effect Options
   const [outputMode, setOutputMode] = useState('transparent');
   const [bgColor, setBgColor] = useState('#ffffff');
   const [blurAmount, setBlurAmount] = useState(10);
@@ -48,102 +48,88 @@ function App() {
     if (displayImage) URL.revokeObjectURL(displayImage);
   }, [originalImage, displayImage]);
 
-  // Inspects IndexedDB for specific @imgly model keys
-  const checkIndexedDB = useCallback(() => {
-    return new Promise((resolve) => {
-      if (!window.indexedDB) return resolve({ cachedMap: { small: false, medium: false, large: false }, totalSize: 0 });
+  // Robust Cache Inspector: Checks Storage API, Cache Storage & IndexedDB
+  const checkStorageAndModels = useCallback(async () => {
+    let totalBytes = 0;
+    const foundModels = { small: false, medium: false, large: false };
 
+    // 1. Get Storage Quota & Usage
+    if (navigator.storage && navigator.storage.estimate) {
       try {
-        const request = indexedDB.open('imgly-background-removal', 1);
-        request.onsuccess = (event) => {
-          const db = event.target.result;
-          if (!db.objectStoreNames.contains('files')) {
-            db.close();
-            return resolve({ cachedMap: { small: false, medium: false, large: false }, totalSize: 0 });
-          }
-
-          const transaction = db.transaction(['files'], 'readonly');
-          const store = transaction.objectStore('files');
-          const getAllKeysReq = store.getAllKeys();
-          const getAllReq = store.getAll();
-
-          let keys = [];
-          let totalSize = 0;
-
-          getAllKeysReq.onsuccess = () => {
-            keys = getAllKeysReq.result || [];
-          };
-
-          getAllReq.onsuccess = () => {
-            const blobs = getAllReq.result || [];
-            blobs.forEach((item) => {
-              if (item instanceof Blob) totalSize += item.size;
-            });
-
-            // Map downloaded keys to models
-            const keyString = keys.join(' ').toLowerCase();
-            const cachedMap = {
-              small: keyString.includes('small') || (keys.length > 0 && !keyString.includes('medium') && !keyString.includes('large')),
-              medium: keyString.includes('medium'),
-              large: keyString.includes('large')
-            };
-
-            db.close();
-            resolve({ cachedMap, totalSize });
-          };
-
-          getAllReq.onerror = () => {
-            db.close();
-            resolve({ cachedMap: { small: false, medium: false, large: false }, totalSize: 0 });
-          };
-        };
-
-        request.onerror = () => resolve({ cachedMap: { small: false, medium: false, large: false }, totalSize: 0 });
-      } catch (error) {
-        resolve({ cachedMap: { small: false, medium: false, large: false }, totalSize: 0 });
+        const estimate = await navigator.storage.estimate();
+        totalBytes = estimate.usage || 0;
+      } catch (e) {
+        console.warn('Storage estimate failed:', e);
       }
-    });
+    }
+
+    // 2. Check Cache Storage keys
+    if ('caches' in window) {
+      try {
+        const cacheNames = await caches.keys();
+        for (const name of cacheNames) {
+          if (name.includes('imgly') || name.includes('background-removal')) {
+            const cache = await caches.open(name);
+            const requests = await cache.keys();
+            const urls = requests.map((r) => r.url.toLowerCase()).join(' ');
+
+            if (urls.includes('small')) foundModels.small = true;
+            if (urls.includes('medium')) foundModels.medium = true;
+            if (urls.includes('large')) foundModels.large = true;
+            if (requests.length > 0 && !urls.includes('medium') && !urls.includes('large')) {
+              foundModels.small = true;
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('Cache Storage inspection failed:', e);
+      }
+    }
+
+    // 3. Check IndexedDB fallback
+    if (window.indexedDB) {
+      try {
+        await new Promise((resolve) => {
+          const req = indexedDB.open('imgly-background-removal', 1);
+          req.onsuccess = (e) => {
+            const db = e.target.result;
+            if (db.objectStoreNames.contains('files')) {
+              const tx = db.transaction(['files'], 'readonly');
+              const store = tx.objectStore('files');
+              const keysReq = store.getAllKeys();
+              keysReq.onsuccess = () => {
+                const keys = (keysReq.result || []).join(' ').toLowerCase();
+                if (keys.includes('small')) foundModels.small = true;
+                if (keys.includes('medium')) foundModels.medium = true;
+                if (keys.includes('large')) foundModels.large = true;
+                if (keysReq.result?.length > 0 && !foundModels.medium && !foundModels.large) {
+                  foundModels.small = true;
+                }
+                db.close();
+                resolve();
+              };
+              keysReq.onerror = () => { db.close(); resolve(); };
+            } else {
+              db.close();
+              resolve();
+            }
+          };
+          req.onerror = () => resolve();
+        });
+      } catch (e) {
+        console.warn('IndexedDB check failed:', e);
+      }
+    }
+
+    setCachedModels(foundModels);
+    setCacheSize(totalBytes);
   }, []);
 
-  const checkModelCache = useCallback(async () => {
-    try {
-      const { cachedMap, totalSize } = await checkIndexedDB();
-      setCachedModels(cachedMap);
-      setCacheSize(totalSize);
-
-      const isCurrentCached = cachedMap[selectedModel];
-      if (!loading) {
-        if (isCurrentCached) {
-          setStatus(`✅ Selected AI Model [${MODEL_CONFIGS[selectedModel].name}] is ready (Cached)`);
-          setStatusType('success');
-        } else {
-          setStatus(`📦 Selected Model [${MODEL_CONFIGS[selectedModel].name}] will download on first run`);
-          setStatusType('info');
-        }
-      }
-    } catch (error) {
-      console.error('Error checking model cache:', error);
-    }
-  }, [checkIndexedDB, selectedModel, loading]);
-
   useEffect(() => {
-    checkModelCache();
-  }, [checkModelCache]);
+    checkStorageAndModels();
+  }, [checkStorageAndModels]);
 
-  // Handle Model Switching directly from Dashboard / Settings
-  const handleSelectModel = (modelKey) => {
-    setSelectedModel(modelKey);
-    const isCached = cachedModels[modelKey];
-    if (isCached) {
-      setStatus(`✅ Switched to ${MODEL_CONFIGS[modelKey].name} (Cached locally)`);
-      setStatusType('success');
-    } else {
-      setStatus(`📦 Switched to ${MODEL_CONFIGS[modelKey].name} (Will download on process)`);
-      setStatusType('info');
-    }
-  };
-
-  // Canvas Compositing Engine for Output Modes
+  // Canvas Engine for Mode Adjustments
   const applyOutputMode = useCallback(async (fgBlob, bgFile, mode, color, blur) => {
     if (!fgBlob) return;
 
@@ -204,27 +190,55 @@ function App() {
     }
   }, [outputMode, bgColor, blurAmount, rawProcessedBlob, originalFile, applyOutputMode]);
 
-  const clearModelCache = async () => {
-    if (window.confirm('Delete all cached AI models? They will be re-downloaded when selected.')) {
-      try {
-        if (window.indexedDB) {
-          const request = indexedDB.deleteDatabase('imgly-background-removal');
-          request.onsuccess = () => {
-            setCachedModels({ small: false, medium: false, large: false });
-            setCacheSize(0);
-            setStatus('🗑️ All cached models cleared.');
-            setStatusType('info');
-            setTimeout(checkModelCache, 500);
-          };
+  // Execute Background Processing
+  const processImage = useCallback(async () => {
+    if (!originalFile) return;
+
+    setLoading(true);
+    setProgress(0);
+    setStatusType('info');
+    startTimeRef.current = Date.now();
+
+    try {
+      const selectedConfig = MODEL_CONFIGS[selectedModel];
+      const blob = await removeBackground(originalFile, {
+        model: selectedConfig.model,
+        numThreads: window.crossOriginIsolated ? 4 : 1,
+        progress: (key, current, total) => {
+          if (total > 0) {
+            const pct = Math.round((current / total) * 100);
+            setProgress(pct);
+            const elapsed = ((Date.now() - startTimeRef.current) / 1000).toFixed(1);
+            setProcessingTime(elapsed);
+
+            if (key.includes('fetch') || key.includes('download')) {
+              setStatus(`⬇️ Downloading ${selectedConfig.name} model... ${pct}%`);
+            } else {
+              setStatus(`🔄 Processing background with ${selectedConfig.name}... ${pct}% (${elapsed}s)`);
+            }
+          }
         }
-      } catch (error) {
-        console.error('Error clearing cache:', error);
-      }
+      });
+
+      setProgress(100);
+      setRawProcessedBlob(blob);
+
+      const totalTime = ((Date.now() - startTimeRef.current) / 1000).toFixed(1);
+      setStatusType('success');
+      setStatus(`✨ Completed in ${totalTime}s using ${selectedConfig.name}`);
+
+      await checkStorageAndModels();
+    } catch (error) {
+      console.error('Error during image processing:', error);
+      setStatusType('error');
+      setStatus('❌ Failed to process image. Try selecting a smaller model.');
+    } finally {
+      setLoading(false);
     }
-  };
+  }, [originalFile, selectedModel, checkStorageAndModels]);
 
   const handleFileUpload = useCallback(
-    async (file) => {
+    (file) => {
       if (!file || !file.type.startsWith('image/')) {
         alert('Please upload a valid image file');
         return;
@@ -234,65 +248,39 @@ function App() {
       setRawProcessedBlob(null);
       setDisplayImage(null);
       setProcessedFileSize(0);
-      setProgress(0);
-      setLoading(true);
-      setStatusType('info');
-      startTimeRef.current = Date.now();
       setOriginalFile(file);
 
       const originalUrl = URL.createObjectURL(file);
       setOriginalImage(originalUrl);
+      setStatus('⚙️ Options selected! Click "Process Image" below to run AI.');
+      setStatusType('info');
+    },
+    [revokeUrls]
+  );
 
+  // Full Model & Storage Clear Action
+  const clearAllModelCache = async () => {
+    if (window.confirm('Clear all downloaded AI models and local storage?')) {
       try {
-        const selectedConfig = MODEL_CONFIGS[selectedModel];
-        const blob = await removeBackground(file, {
-          model: selectedConfig.model,
-          progress: (key, current, total) => {
-            if (total > 0) {
-              const pct = Math.round((current / total) * 100);
-              setProgress(pct);
-              const elapsed = ((Date.now() - startTimeRef.current) / 1000).toFixed(1);
-              setProcessingTime(elapsed);
-
-              if (key.includes('fetch') || key.includes('download')) {
-                setStatus(`⬇️ Downloading ${selectedConfig.name}... ${pct}%`);
-              } else {
-                setStatus(`🔄 Removing background using ${selectedConfig.name}... ${pct}% (${elapsed}s)`);
-              }
-            }
+        if ('caches' in window) {
+          const keys = await caches.keys();
+          for (const key of keys) {
+            await caches.delete(key);
           }
-        });
-
-        setProgress(100);
-        setRawProcessedBlob(blob);
-
-        const totalTime = ((Date.now() - startTimeRef.current) / 1000).toFixed(1);
-        setStatusType('success');
-        setStatus(`✨ Done! Processed with [${selectedConfig.name}] in ${totalTime}s`);
-
-        await checkModelCache();
-      } catch (error) {
-        console.error('Error processing image:', error);
-        setStatusType('error');
-        setStatus('❌ Failed to process image. Please try again.');
-        setProgress(0);
-      } finally {
-        setLoading(false);
+        }
+        if (window.indexedDB) {
+          indexedDB.deleteDatabase('imgly-background-removal');
+        }
+        setCachedModels({ small: false, medium: false, large: false });
+        setCacheSize(0);
+        setStatus('🗑️ All local model storage cleared.');
+        setStatusType('info');
+        setTimeout(checkStorageAndModels, 500);
+      } catch (e) {
+        console.error('Error clearing storage:', e);
       }
-    },
-    [selectedModel, checkModelCache, revokeUrls]
-  );
-
-  const handleDrop = useCallback(
-    (e) => {
-      e.preventDefault();
-      setIsDragging(false);
-      if (e.dataTransfer.files?.[0]) {
-        handleFileUpload(e.dataTransfer.files[0]);
-      }
-    },
-    [handleFileUpload]
-  );
+    }
+  };
 
   const handleReset = () => {
     revokeUrls();
@@ -302,12 +290,12 @@ function App() {
     setDisplayImage(null);
     setProcessedFileSize(0);
     setProgress(0);
-    setStatus('📸 Ready to upload an image');
+    setStatus('📸 Upload an image to get started');
     setStatusType('info');
     setLoading(false);
     setProcessingTime(0);
     if (fileInputRef.current) fileInputRef.current.value = '';
-    checkModelCache();
+    checkStorageAndModels();
   };
 
   const handleDownload = () => {
@@ -322,7 +310,7 @@ function App() {
   };
 
   const formatSize = (bytes) => {
-    if (bytes === 0) return '0 B';
+    if (!bytes || bytes === 0) return '0 B';
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
@@ -348,14 +336,13 @@ function App() {
             <button
               className="settings-toggle"
               onClick={() => setShowSettings(!showSettings)}
-              title="Settings & Model Management"
+              title="Settings & Storage Management"
             >
               ⚙️
             </button>
           </div>
-          <p>Remove image backgrounds instantly • 100% private</p>
+          <p>Remove or edit image backgrounds locally • 100% private</p>
 
-          {/* Local Model Switcher on Main Header */}
           <div className="model-selector-bar">
             <span className="selector-label">Active Model:</span>
             <div className="model-pill-group">
@@ -365,8 +352,8 @@ function App() {
                 return (
                   <button
                     key={key}
-                    className={`model-pill ${isActive ? 'active' : ''} ${isDownloaded ? 'downloaded' : ''}`}
-                    onClick={() => handleSelectModel(key)}
+                    className={`model-pill ${isActive ? 'active' : ''}`}
+                    onClick={() => setSelectedModel(key)}
                   >
                     {config.name}
                     {isDownloaded ? <span className="pill-badge">💾 Local</span> : <span className="pill-badge dim">☁️ Cloud</span>}
@@ -382,13 +369,13 @@ function App() {
         <div className="settings-panel" onClick={(e) => e.target === e.currentTarget && setShowSettings(false)}>
           <div className="settings-content-panel">
             <div className="settings-header">
-              <h3>⚙️ AI Model Management</h3>
+              <h3>⚙️ AI Models & Storage</h3>
               <button onClick={() => setShowSettings(false)}>✕</button>
             </div>
 
             <div className="settings-body">
               <div className="setting-group">
-                <label>Downloaded Models & Selection</label>
+                <label>Model Configuration & Status</label>
                 <div className="model-options">
                   {Object.entries(MODEL_CONFIGS).map(([key, config]) => {
                     const isDownloaded = cachedModels[key];
@@ -397,14 +384,14 @@ function App() {
                       <div
                         key={key}
                         className={`model-option ${isActive ? 'active' : ''}`}
-                        onClick={() => handleSelectModel(key)}
+                        onClick={() => setSelectedModel(key)}
                       >
                         <div className="model-name">
                           {config.name}
                           {isDownloaded && <span className="status-tag cached">💾 Downloaded</span>}
                         </div>
                         <div className="model-details">
-                          <span>Size: {config.size}</span>
+                          <span>Est Size: {config.size}</span>
                           <span>Quality: {config.quality}</span>
                         </div>
                       </div>
@@ -414,14 +401,14 @@ function App() {
               </div>
 
               <div className="setting-group">
-                <label>Storage Summary</label>
+                <label>Offline Storage Overview</label>
                 <div className="model-status-info">
                   <div className="status-item">
-                    <span>IndexedDB Footprint:</span>
-                    <span>{formatSize(cacheSize)}</span>
+                    <span>Total Storage Occupied:</span>
+                    <span className="highlight-text">{formatSize(cacheSize)}</span>
                   </div>
                   <div className="status-item">
-                    <span>Active Selected Model:</span>
+                    <span>Active Processing Engine:</span>
                     <span>{MODEL_CONFIGS[selectedModel]?.name}</span>
                   </div>
                 </div>
@@ -429,8 +416,8 @@ function App() {
 
               <div className="setting-group">
                 <div className="action-buttons-settings">
-                  <button className="btn-danger" onClick={clearModelCache} disabled={!hasAnyCache}>
-                    🗑️ Clear All Offline Models
+                  <button className="btn-danger" onClick={clearAllModelCache} disabled={!hasAnyCache && cacheSize === 0}>
+                    🗑️ Clear Offline Models & Storage
                   </button>
                 </div>
               </div>
@@ -443,7 +430,11 @@ function App() {
         {!originalImage ? (
           <div
             className={`drop-zone ${isDragging ? 'dragging' : ''}`}
-            onDrop={handleDrop}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDragging(false);
+              if (e.dataTransfer.files?.[0]) handleFileUpload(e.dataTransfer.files[0]);
+            }}
             onDragOver={(e) => {
               e.preventDefault();
               setIsDragging(true);
@@ -478,10 +469,51 @@ function App() {
               <span className="status-text">{status}</span>
             </div>
 
+            {/* Workflow Mode Bar Options */}
+            <div className="mode-selector-panel">
+              <label className="mode-label">Target Background Style:</label>
+              <div className="mode-buttons">
+                {MODE_OPTIONS.map((m) => (
+                  <button
+                    key={m.id}
+                    className={`mode-btn ${outputMode === m.id ? 'active' : ''}`}
+                    onClick={() => setOutputMode(m.id)}
+                  >
+                    {m.icon} {m.name}
+                  </button>
+                ))}
+              </div>
+
+              {outputMode === 'color' && (
+                <div className="mode-controls">
+                  <label>Fill Color:</label>
+                  <input
+                    type="color"
+                    value={bgColor}
+                    onChange={(e) => setBgColor(e.target.value)}
+                    className="color-picker"
+                  />
+                </div>
+              )}
+
+              {outputMode === 'blur' && (
+                <div className="mode-controls">
+                  <label>Blur Amount: {blurAmount}px</label>
+                  <input
+                    type="range"
+                    min="1"
+                    max="30"
+                    value={blurAmount}
+                    onChange={(e) => setBlurAmount(Number(e.target.value))}
+                  />
+                </div>
+              )}
+            </div>
+
             {loading && (
               <div className="progress-container">
                 <div className="progress-header">
-                  <span className="progress-label">Processing</span>
+                  <span className="progress-label">AI Processing in Progress</span>
                   <span className="progress-percentage">{progress}%</span>
                 </div>
                 <div className="progress-bar-bg">
@@ -490,45 +522,11 @@ function App() {
               </div>
             )}
 
-            {!loading && rawProcessedBlob && (
-              <div className="mode-selector-panel">
-                <label className="mode-label">Output Mode:</label>
-                <div className="mode-buttons">
-                  {MODE_OPTIONS.map((m) => (
-                    <button
-                      key={m.id}
-                      className={`mode-btn ${outputMode === m.id ? 'active' : ''}`}
-                      onClick={() => setOutputMode(m.id)}
-                    >
-                      {m.icon} {m.name}
-                    </button>
-                  ))}
-                </div>
-
-                {outputMode === 'color' && (
-                  <div className="mode-controls">
-                    <label>Background Color:</label>
-                    <input
-                      type="color"
-                      value={bgColor}
-                      onChange={(e) => setBgColor(e.target.value)}
-                      className="color-picker"
-                    />
-                  </div>
-                )}
-
-                {outputMode === 'blur' && (
-                  <div className="mode-controls">
-                    <label>Blur Intensity: {blurAmount}px</label>
-                    <input
-                      type="range"
-                      min="1"
-                      max="30"
-                      value={blurAmount}
-                      onChange={(e) => setBlurAmount(Number(e.target.value))}
-                    />
-                  </div>
-                )}
+            {!rawProcessedBlob && !loading && (
+              <div className="process-trigger-container">
+                <button className="btn btn-primary btn-large" onClick={processImage}>
+                  ⚡ Process Image Now
+                </button>
               </div>
             )}
 
@@ -558,8 +556,7 @@ function App() {
                       <img src={displayImage} alt="Processed output" />
                     ) : (
                       <div className="placeholder">
-                        <div className="spinner"></div>
-                        <p>Processing image...</p>
+                        <p>{loading ? 'AI processing running...' : 'Click "Process Image Now" above'}</p>
                       </div>
                     )}
                   </div>
@@ -570,12 +567,17 @@ function App() {
                 {displayImage && (
                   <>
                     <button className="btn btn-primary" onClick={handleDownload}>
-                      Download Result
+                      💾 Download Result
                     </button>
                     <button className="btn btn-secondary" onClick={handleReset}>
-                      New Image
+                      🔄 New Image
                     </button>
                   </>
+                )}
+                {!displayImage && !loading && (
+                  <button className="btn btn-secondary" onClick={handleReset}>
+                    ↩ Cancel / Go Back
+                  </button>
                 )}
               </div>
             </div>
