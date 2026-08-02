@@ -1,150 +1,142 @@
-// src/App.js
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { removeBackground } from '@imgly/background-removal';
 import './App.css';
 
-const MODEL_CONFIGS = {
-  small: { name: 'Small (Fast)', size: '~40 MB', quality: 'Good', speed: 'Fast', model: 'small' },
-  medium: { name: 'Medium (Balanced)', size: '~60 MB', quality: 'Better', speed: 'Medium', model: 'medium' },
-  large: { name: 'Large (Best Quality)', size: '~80 MB', quality: 'Best', speed: 'Slow', model: 'large' }
-};
-
-const MODE_OPTIONS = [
-  { id: 'transparent', name: 'Transparent', icon: '✨', desc: 'Remove background completely' },
-  { id: 'color', name: 'Solid Color', icon: '🎨', desc: 'Replace background with color' },
-  { id: 'blur', name: 'Blurred BG', icon: '💧', desc: 'Keep original background blurred' }
-];
-
 function App() {
-  const [originalImage, setOriginalImage] = useState(null);
   const [originalFile, setOriginalFile] = useState(null);
-  const [rawProcessedBlob, setRawProcessedBlob] = useState(null);
-  const [displayImage, setDisplayImage] = useState(null);
-  const [processedFileSize, setProcessedFileSize] = useState(0);
+  const [originalUrl, setOriginalUrl] = useState(null);
+  const [blurredOriginalUrl, setBlurredOriginalUrl] = useState(null);
+  
+  const [rawCutoutBlob, setRawCutoutBlob] = useState(null);
+  const [finalResultUrl, setFinalResultUrl] = useState(null);
 
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [status, setStatus] = useState('📸 Upload an image to get started');
+  const [status, setStatus] = useState('📸 Drop an image to transform it');
   const [statusType, setStatusType] = useState('info');
-  const [isDragging, setIsDragging] = useState(false);
-  const [selectedModel, setSelectedModel] = useState('small');
-  const [processingTime, setProcessingTime] = useState(0);
-  const [showSettings, setShowSettings] = useState(false);
 
-  // Storage and Cache State
-  const [cachedModels, setCachedModels] = useState({ small: false, medium: false, large: false });
-  const [cacheSize, setCacheSize] = useState(0);
-
-  // Output Effect Options
-  const [outputMode, setOutputMode] = useState('transparent');
-  const [bgColor, setBgColor] = useState('#ffffff');
-  const [blurAmount, setBlurAmount] = useState(10);
+  // Customization controls
+  const [activeTab, setActiveTab] = useState('original'); // 'original' | 'cutout'
+  const [origBlur, setOrigBlur] = useState(0);
+  
+  const [bgStyle, setBgStyle] = useState('transparent'); // 'transparent' | 'color' | 'blur'
+  const [solidColor, setSolidColor] = useState('#6366f1');
+  const [bgBlur, setBgBlur] = useState(12);
 
   const fileInputRef = useRef(null);
-  const startTimeRef = useRef(null);
 
-  const revokeUrls = useCallback(() => {
-    if (originalImage) URL.revokeObjectURL(originalImage);
-    if (displayImage) URL.revokeObjectURL(displayImage);
-  }, [originalImage, displayImage]);
+  // Clean up Object URLs from memory
+  const cleanupUrls = useCallback(() => {
+    if (originalUrl) URL.revokeObjectURL(originalUrl);
+    if (blurredOriginalUrl) URL.revokeObjectURL(blurredOriginalUrl);
+    if (finalResultUrl) URL.revokeObjectURL(finalResultUrl);
+  }, [originalUrl, blurredOriginalUrl, finalResultUrl]);
 
-  // Robust Cache Inspector: Checks Storage API, Cache Storage & IndexedDB
-  const checkStorageAndModels = useCallback(async () => {
-    let totalBytes = 0;
-    const foundModels = { small: false, medium: false, large: false };
-
-    // 1. Get Storage Quota & Usage
-    if (navigator.storage && navigator.storage.estimate) {
-      try {
-        const estimate = await navigator.storage.estimate();
-        totalBytes = estimate.usage || 0;
-      } catch (e) {
-        console.warn('Storage estimate failed:', e);
-      }
+  // Handle Input Image Upload
+  const handleFileUpload = (file) => {
+    if (!file?.type.startsWith('image/')) {
+      alert('Please upload a valid image file');
+      return;
     }
+    cleanupUrls();
+    setRawCutoutBlob(null);
+    setFinalResultUrl(null);
+    setOrigBlur(0);
+    
+    setOriginalFile(file);
+    const url = URL.createObjectURL(file);
+    setOriginalUrl(url);
+    setBlurredOriginalUrl(url);
+    setStatus('✨ Image loaded! Apply blur or remove background below.');
+    setStatusType('info');
+  };
 
-    // 2. Check Cache Storage keys
-    if ('caches' in window) {
-      try {
-        const cacheNames = await caches.keys();
-        for (const name of cacheNames) {
-          if (name.includes('imgly') || name.includes('background-removal')) {
-            const cache = await caches.open(name);
-            const requests = await cache.keys();
-            const urls = requests.map((r) => r.url.toLowerCase()).join(' ');
-
-            if (urls.includes('small')) foundModels.small = true;
-            if (urls.includes('medium')) foundModels.medium = true;
-            if (urls.includes('large')) foundModels.large = true;
-            if (requests.length > 0 && !urls.includes('medium') && !urls.includes('large')) {
-              foundModels.small = true;
-            }
-          }
-        }
-      } catch (e) {
-        console.warn('Cache Storage inspection failed:', e);
-      }
-    }
-
-    // 3. Check IndexedDB fallback
-    if (window.indexedDB) {
-      try {
-        await new Promise((resolve) => {
-          const req = indexedDB.open('imgly-background-removal', 1);
-          req.onsuccess = (e) => {
-            const db = e.target.result;
-            if (db.objectStoreNames.contains('files')) {
-              const tx = db.transaction(['files'], 'readonly');
-              const store = tx.objectStore('files');
-              const keysReq = store.getAllKeys();
-              keysReq.onsuccess = () => {
-                const keys = (keysReq.result || []).join(' ').toLowerCase();
-                if (keys.includes('small')) foundModels.small = true;
-                if (keys.includes('medium')) foundModels.medium = true;
-                if (keys.includes('large')) foundModels.large = true;
-                if (keysReq.result?.length > 0 && !foundModels.medium && !foundModels.large) {
-                  foundModels.small = true;
-                }
-                db.close();
-                resolve();
-              };
-              keysReq.onerror = () => { db.close(); resolve(); };
-            } else {
-              db.close();
-              resolve();
-            }
-          };
-          req.onerror = () => resolve();
-        });
-      } catch (e) {
-        console.warn('IndexedDB check failed:', e);
-      }
-    }
-
-    setCachedModels(foundModels);
-    setCacheSize(totalBytes);
-  }, []);
-
+  // Render Blur on Original Image via Canvas
   useEffect(() => {
-    checkStorageAndModels();
-  }, [checkStorageAndModels]);
+    if (!originalUrl) return;
 
-  // Canvas Engine for Mode Adjustments
-  const applyOutputMode = useCallback(async (fgBlob, bgFile, mode, color, blur) => {
-    if (!fgBlob) return;
+    if (origBlur === 0) {
+      setBlurredOriginalUrl(originalUrl);
+      return;
+    }
 
-    if (mode === 'transparent') {
-      const url = URL.createObjectURL(fgBlob);
-      setDisplayImage((prev) => {
+    const img = new Image();
+    img.src = originalUrl;
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+
+      ctx.filter = `blur(${origBlur}px)`;
+      ctx.drawImage(img, 0, 0);
+
+      canvas.toBlob((blob) => {
+        if (blob) {
+          const newUrl = URL.createObjectURL(blob);
+          setBlurredOriginalUrl((prev) => {
+            if (prev && prev !== originalUrl) URL.revokeObjectURL(prev);
+            return newUrl;
+          });
+        }
+      }, 'image/png');
+    };
+  }, [originalUrl, origBlur]);
+
+  // AI Background Removal Execution
+  const processAI = async () => {
+    if (!originalFile) return;
+
+    setLoading(true);
+    setProgress(5);
+    setStatusType('info');
+    setStatus('⚡ Initializing fast AI engine...');
+
+    try {
+      const blob = await removeBackground(originalFile, {
+        model: 'isnet_quint8',
+        progress: (key, current, total) => {
+          if (total > 0) {
+            const pct = Math.round((current / total) * 100);
+            setProgress(pct);
+            setStatus(
+              key.includes('download')
+                ? `⬇️ Fetching AI weights... ${pct}%`
+                : `✂️ Extracting subject... ${pct}%`
+            );
+          }
+        },
+      });
+
+      setRawCutoutBlob(blob);
+      setProgress(100);
+      setStatusType('success');
+      setStatus('🎉 Background removed successfully!');
+      setActiveTab('cutout');
+    } catch (err) {
+      console.error(err);
+      setStatusType('error');
+      setStatus('❌ Failed to process image locally.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Compose Final AI Output
+  const renderFinalResult = useCallback(async () => {
+    if (!rawCutoutBlob || !originalUrl) return;
+
+    if (bgStyle === 'transparent') {
+      const url = URL.createObjectURL(rawCutoutBlob);
+      setFinalResultUrl((prev) => {
         if (prev) URL.revokeObjectURL(prev);
         return url;
       });
-      setProcessedFileSize(fgBlob.size);
       return;
     }
 
     const fgImg = new Image();
-    fgImg.src = URL.createObjectURL(fgBlob);
+    fgImg.src = URL.createObjectURL(rawCutoutBlob);
     await fgImg.decode();
 
     const canvas = document.createElement('canvas');
@@ -152,17 +144,17 @@ function App() {
     canvas.height = fgImg.height;
     const ctx = canvas.getContext('2d');
 
-    if (mode === 'color') {
-      ctx.fillStyle = color;
+    if (bgStyle === 'color') {
+      ctx.fillStyle = solidColor;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(fgImg, 0, 0);
-    } else if (mode === 'blur' && bgFile) {
+    } else if (bgStyle === 'blur') {
       const bgImg = new Image();
-      bgImg.src = URL.createObjectURL(bgFile);
+      bgImg.src = originalUrl;
       await bgImg.decode();
 
       ctx.save();
-      ctx.filter = `blur(${blur}px)`;
+      ctx.filter = `blur(${bgBlur}px)`;
       ctx.drawImage(bgImg, 0, 0, canvas.width, canvas.height);
       ctx.restore();
 
@@ -175,425 +167,237 @@ function App() {
     canvas.toBlob((blob) => {
       if (blob) {
         const url = URL.createObjectURL(blob);
-        setDisplayImage((prev) => {
+        setFinalResultUrl((prev) => {
           if (prev) URL.revokeObjectURL(prev);
           return url;
         });
-        setProcessedFileSize(blob.size);
       }
     }, 'image/png');
-  }, []);
+  }, [rawCutoutBlob, originalUrl, bgStyle, solidColor, bgBlur]);
 
   useEffect(() => {
-    if (rawProcessedBlob && originalFile) {
-      applyOutputMode(rawProcessedBlob, originalFile, outputMode, bgColor, blurAmount);
-    }
-  }, [outputMode, bgColor, blurAmount, rawProcessedBlob, originalFile, applyOutputMode]);
+    renderFinalResult();
+  }, [renderFinalResult]);
 
-  // Execute Background Processing
-  const processImage = useCallback(async () => {
-    if (!originalFile) return;
-
-    setLoading(true);
-    setProgress(0);
-    setStatusType('info');
-    startTimeRef.current = Date.now();
-
-    try {
-      const selectedConfig = MODEL_CONFIGS[selectedModel];
-      const blob = await removeBackground(originalFile, {
-        model: selectedConfig.model,
-        numThreads: window.crossOriginIsolated ? 4 : 1,
-        progress: (key, current, total) => {
-          if (total > 0) {
-            const pct = Math.round((current / total) * 100);
-            setProgress(pct);
-            const elapsed = ((Date.now() - startTimeRef.current) / 1000).toFixed(1);
-            setProcessingTime(elapsed);
-
-            if (key.includes('fetch') || key.includes('download')) {
-              setStatus(`⬇️ Downloading ${selectedConfig.name} model... ${pct}%`);
-            } else {
-              setStatus(`🔄 Processing background with ${selectedConfig.name}... ${pct}% (${elapsed}s)`);
-            }
-          }
-        }
-      });
-
-      setProgress(100);
-      setRawProcessedBlob(blob);
-
-      const totalTime = ((Date.now() - startTimeRef.current) / 1000).toFixed(1);
-      setStatusType('success');
-      setStatus(`✨ Completed in ${totalTime}s using ${selectedConfig.name}`);
-
-      await checkStorageAndModels();
-    } catch (error) {
-      console.error('Error during image processing:', error);
-      setStatusType('error');
-      setStatus('❌ Failed to process image. Try selecting a smaller model.');
-    } finally {
-      setLoading(false);
-    }
-  }, [originalFile, selectedModel, checkStorageAndModels]);
-
-  const handleFileUpload = useCallback(
-    (file) => {
-      if (!file || !file.type.startsWith('image/')) {
-        alert('Please upload a valid image file');
-        return;
-      }
-
-      revokeUrls();
-      setRawProcessedBlob(null);
-      setDisplayImage(null);
-      setProcessedFileSize(0);
-      setOriginalFile(file);
-
-      const originalUrl = URL.createObjectURL(file);
-      setOriginalImage(originalUrl);
-      setStatus('⚙️ Options selected! Click "Process Image" below to run AI.');
-      setStatusType('info');
-    },
-    [revokeUrls]
-  );
-
-  // Full Model & Storage Clear Action
-  const clearAllModelCache = async () => {
-    if (window.confirm('Clear all downloaded AI models and local storage?')) {
-      try {
-        if ('caches' in window) {
-          const keys = await caches.keys();
-          for (const key of keys) {
-            await caches.delete(key);
-          }
-        }
-        if (window.indexedDB) {
-          indexedDB.deleteDatabase('imgly-background-removal');
-        }
-        setCachedModels({ small: false, medium: false, large: false });
-        setCacheSize(0);
-        setStatus('🗑️ All local model storage cleared.');
-        setStatusType('info');
-        setTimeout(checkStorageAndModels, 500);
-      } catch (e) {
-        console.error('Error clearing storage:', e);
-      }
-    }
+  // Download Trigger
+  const downloadImage = (url, prefix = 'image') => {
+    if (!url) return;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${prefix}-${Date.now()}.png`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   };
 
+  // Reset Application
   const handleReset = () => {
-    revokeUrls();
-    setOriginalImage(null);
+    cleanupUrls();
     setOriginalFile(null);
-    setRawProcessedBlob(null);
-    setDisplayImage(null);
-    setProcessedFileSize(0);
+    setOriginalUrl(null);
+    setBlurredOriginalUrl(null);
+    setRawCutoutBlob(null);
+    setFinalResultUrl(null);
     setProgress(0);
-    setStatus('📸 Upload an image to get started');
+    setStatus('📸 Drop an image to transform it');
     setStatusType('info');
-    setLoading(false);
-    setProcessingTime(0);
+    setActiveTab('original');
     if (fileInputRef.current) fileInputRef.current.value = '';
-    checkStorageAndModels();
   };
-
-  const handleDownload = () => {
-    if (displayImage) {
-      const link = document.createElement('a');
-      link.href = displayImage;
-      link.download = `bg-removed-${outputMode}-${Date.now()}.png`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    }
-  };
-
-  const formatSize = (bytes) => {
-    if (!bytes || bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-  };
-
-  const hasAnyCache = Object.values(cachedModels).some(Boolean);
 
   return (
-    <div className="app">
-      <div className="bg-animation">
-        <div className="orb orb1"></div>
-        <div className="orb orb2"></div>
-        <div className="orb orb3"></div>
-      </div>
+    <div className="app-container">
+      {/* Dynamic Background Design */}
+      <div className="gradient-glow glow-1"></div>
+      <div className="gradient-glow glow-2"></div>
 
-      <header className="header">
-        <div className="header-content">
-          <div className="header-top">
-            <h1>
-              <span className="gradient-text">Background Remover</span>
-            </h1>
-            <button
-              className="settings-toggle"
-              onClick={() => setShowSettings(!showSettings)}
-              title="Settings & Storage Management"
-            >
-              ⚙️
-            </button>
-          </div>
-          <p>Remove or edit image backgrounds locally • 100% private</p>
-
-          <div className="model-selector-bar">
-            <span className="selector-label">Active Model:</span>
-            <div className="model-pill-group">
-              {Object.entries(MODEL_CONFIGS).map(([key, config]) => {
-                const isDownloaded = cachedModels[key];
-                const isActive = selectedModel === key;
-                return (
-                  <button
-                    key={key}
-                    className={`model-pill ${isActive ? 'active' : ''}`}
-                    onClick={() => setSelectedModel(key)}
-                  >
-                    {config.name}
-                    {isDownloaded ? <span className="pill-badge">💾 Local</span> : <span className="pill-badge dim">☁️ Cloud</span>}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+      <header className="app-header">
+        <div className="brand-wrapper">
+          <img src="/logo.png" alt="Bro Developer Logo" className="app-logo" />
+          <h1>
+            BG-Remover<span className="accent-text"> ( AI )</span>
+          </h1>
         </div>
+        <p>Ultra-fast client-side background removal & photo editing</p>
       </header>
 
-      {showSettings && (
-        <div className="settings-panel" onClick={(e) => e.target === e.currentTarget && setShowSettings(false)}>
-          <div className="settings-content-panel">
-            <div className="settings-header">
-              <h3>⚙️ AI Models & Storage</h3>
-              <button onClick={() => setShowSettings(false)}>✕</button>
-            </div>
-
-            <div className="settings-body">
-              <div className="setting-group">
-                <label>Model Configuration & Status</label>
-                <div className="model-options">
-                  {Object.entries(MODEL_CONFIGS).map(([key, config]) => {
-                    const isDownloaded = cachedModels[key];
-                    const isActive = selectedModel === key;
-                    return (
-                      <div
-                        key={key}
-                        className={`model-option ${isActive ? 'active' : ''}`}
-                        onClick={() => setSelectedModel(key)}
-                      >
-                        <div className="model-name">
-                          {config.name}
-                          {isDownloaded && <span className="status-tag cached">💾 Downloaded</span>}
-                        </div>
-                        <div className="model-details">
-                          <span>Est Size: {config.size}</span>
-                          <span>Quality: {config.quality}</span>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="setting-group">
-                <label>Offline Storage Overview</label>
-                <div className="model-status-info">
-                  <div className="status-item">
-                    <span>Total Storage Occupied:</span>
-                    <span className="highlight-text">{formatSize(cacheSize)}</span>
-                  </div>
-                  <div className="status-item">
-                    <span>Active Processing Engine:</span>
-                    <span>{MODEL_CONFIGS[selectedModel]?.name}</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="setting-group">
-                <div className="action-buttons-settings">
-                  <button className="btn-danger" onClick={clearAllModelCache} disabled={!hasAnyCache && cacheSize === 0}>
-                    🗑️ Clear Offline Models & Storage
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <main className="main">
-        {!originalImage ? (
+      <main className="main-content">
+        {!originalUrl ? (
+          /* Dropzone */
           <div
-            className={`drop-zone ${isDragging ? 'dragging' : ''}`}
+            className="dropzone-card"
+            onClick={() => fileInputRef.current?.click()}
+            onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => {
               e.preventDefault();
-              setIsDragging(false);
               if (e.dataTransfer.files?.[0]) handleFileUpload(e.dataTransfer.files[0]);
             }}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setIsDragging(true);
-            }}
-            onDragLeave={(e) => {
-              e.preventDefault();
-              setIsDragging(false);
-            }}
-            onClick={() => fileInputRef.current?.click()}
           >
-            <div className="drop-content">
-              <div className="upload-icon">📤</div>
-              <h2>Drop your image here</h2>
-              <p>or click to select file</p>
-              <div className="format-badges">
-                <span>JPG</span>
-                <span>PNG</span>
-                <span>WebP</span>
-              </div>
+            <div className="dropzone-inner">
+              <div className="icon-wrapper">🖼️</div>
+              <h2>Choose an image or drag it here</h2>
+              <p>Supports high-res PNG, JPG, WebP</p>
+              <button className="btn btn-glow">Browse File</button>
               <input
                 ref={fileInputRef}
                 type="file"
                 accept="image/*"
-                onChange={(e) => handleFileUpload(e.target.files[0])}
                 style={{ display: 'none' }}
+                onChange={(e) => handleFileUpload(e.target.files[0])}
               />
             </div>
           </div>
         ) : (
-          <div className="workspace">
-            <div className={`status-bar ${statusType}`}>
-              <span className="status-text">{status}</span>
-            </div>
+          /* Editor Layout */
+          <div className="editor-layout">
+            {/* Status Header */}
+            <div className={`status-pill ${statusType}`}>{status}</div>
 
-            {/* Workflow Mode Bar Options */}
-            <div className="mode-selector-panel">
-              <label className="mode-label">Target Background Style:</label>
-              <div className="mode-buttons">
-                {MODE_OPTIONS.map((m) => (
-                  <button
-                    key={m.id}
-                    className={`mode-btn ${outputMode === m.id ? 'active' : ''}`}
-                    onClick={() => setOutputMode(m.id)}
-                  >
-                    {m.icon} {m.name}
-                  </button>
-                ))}
-              </div>
-
-              {outputMode === 'color' && (
-                <div className="mode-controls">
-                  <label>Fill Color:</label>
-                  <input
-                    type="color"
-                    value={bgColor}
-                    onChange={(e) => setBgColor(e.target.value)}
-                    className="color-picker"
-                  />
-                </div>
-              )}
-
-              {outputMode === 'blur' && (
-                <div className="mode-controls">
-                  <label>Blur Amount: {blurAmount}px</label>
-                  <input
-                    type="range"
-                    min="1"
-                    max="30"
-                    value={blurAmount}
-                    onChange={(e) => setBlurAmount(Number(e.target.value))}
-                  />
-                </div>
-              )}
-            </div>
-
+            {/* Progress Bar */}
             {loading && (
-              <div className="progress-container">
-                <div className="progress-header">
-                  <span className="progress-label">AI Processing in Progress</span>
-                  <span className="progress-percentage">{progress}%</span>
-                </div>
-                <div className="progress-bar-bg">
-                  <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
-                </div>
+              <div className="progress-box">
+                <div className="progress-bar-fill" style={{ width: `${progress}%` }}></div>
               </div>
             )}
 
-            {!rawProcessedBlob && !loading && (
-              <div className="process-trigger-container">
-                <button className="btn btn-primary btn-large" onClick={processImage}>
-                  ⚡ Process Image Now
-                </button>
-              </div>
-            )}
+            {/* Workspace Header Tabs */}
+            <div className="tabs-header">
+              <button
+                className={`tab-btn ${activeTab === 'original' ? 'active' : ''}`}
+                onClick={() => setActiveTab('original')}
+              >
+                1. Original & Quick Blur
+              </button>
+              <button
+                className={`tab-btn ${activeTab === 'cutout' ? 'active' : ''}`}
+                onClick={() => {
+                  if (!rawCutoutBlob) processAI();
+                  setActiveTab('cutout');
+                }}
+              >
+                2. AI Cutout Studio {rawCutoutBlob ? '✨' : ''}
+              </button>
+            </div>
 
-            <div className="comparison-container">
-              <div className="image-grid">
-                <div className="image-card">
-                  <div className="card-header">
-                    <span className="card-label">Original</span>
-                    <span className="file-size">{formatSize(originalFile?.size || 0)}</span>
+            {/* Tab 1: Original Image Editing */}
+            {activeTab === 'original' && (
+              <div className="tab-pane">
+                <div className="control-bar">
+                  <div className="slider-group">
+                    <label>
+                      💧 Original Blur: <span>{origBlur}px</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="0"
+                      max="40"
+                      value={origBlur}
+                      onChange={(e) => setOrigBlur(Number(e.target.value))}
+                    />
                   </div>
-                  <div className="image-wrapper">
-                    <img src={originalImage} alt="Original input" />
-                  </div>
-                </div>
 
-                <div className="vs-divider">
-                  <span>VS</span>
-                </div>
-
-                <div className="image-card">
-                  <div className="card-header">
-                    <span className="card-label">Result ({outputMode})</span>
-                    {processedFileSize > 0 && <span className="file-size">{formatSize(processedFileSize)}</span>}
-                  </div>
-                  <div className="image-wrapper checkerboard-bg">
-                    {displayImage ? (
-                      <img src={displayImage} alt="Processed output" />
-                    ) : (
-                      <div className="placeholder">
-                        <p>{loading ? 'AI processing running...' : 'Click "Process Image Now" above'}</p>
-                      </div>
+                  <div className="button-group">
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => downloadImage(blurredOriginalUrl, 'blurred-original')}
+                    >
+                      💾 Download This Image
+                    </button>
+                    {!rawCutoutBlob && (
+                      <button className="btn btn-primary" onClick={processAI} disabled={loading}>
+                        ⚡ Remove Background Now
+                      </button>
                     )}
                   </div>
                 </div>
-              </div>
 
-              <div className="action-buttons">
-                {displayImage && (
-                  <>
-                    <button className="btn btn-primary" onClick={handleDownload}>
-                      💾 Download Result
-                    </button>
-                    <button className="btn btn-secondary" onClick={handleReset}>
-                      🔄 New Image
-                    </button>
-                  </>
-                )}
-                {!displayImage && !loading && (
-                  <button className="btn btn-secondary" onClick={handleReset}>
-                    ↩ Cancel / Go Back
-                  </button>
-                )}
+                <div className="preview-viewport">
+                  <img src={blurredOriginalUrl || originalUrl} alt="Original preview" />
+                </div>
               </div>
+            )}
+
+            {/* Tab 2: Cutout & Custom Background */}
+            {activeTab === 'cutout' && (
+              <div className="tab-pane">
+                <div className="control-bar stacked">
+                  <div className="style-pills">
+                    <button
+                      className={`pill ${bgStyle === 'transparent' ? 'active' : ''}`}
+                      onClick={() => setBgStyle('transparent')}
+                    >
+                      ✨ Transparent
+                    </button>
+                    <button
+                      className={`pill ${bgStyle === 'color' ? 'active' : ''}`}
+                      onClick={() => setBgStyle('color')}
+                    >
+                      🎨 Solid Color
+                    </button>
+                    <button
+                      className={`pill ${bgStyle === 'blur' ? 'active' : ''}`}
+                      onClick={() => setBgStyle('blur')}
+                    >
+                      💧 Blurred Background
+                    </button>
+                  </div>
+
+                  {bgStyle === 'color' && (
+                    <div className="inline-control">
+                      <label>Color Picker:</label>
+                      <input
+                        type="color"
+                        value={solidColor}
+                        onChange={(e) => setSolidColor(e.target.value)}
+                        className="color-input"
+                      />
+                    </div>
+                  )}
+
+                  {bgStyle === 'blur' && (
+                    <div className="slider-group">
+                      <label>Background Blur: {bgBlur}px</label>
+                      <input
+                        type="range"
+                        min="1"
+                        max="50"
+                        value={bgBlur}
+                        onChange={(e) => setBgBlur(Number(e.target.value))}
+                      />
+                    </div>
+                  )}
+
+                  {finalResultUrl && (
+                    <button
+                      className="btn btn-primary"
+                      onClick={() => downloadImage(finalResultUrl, `cutout-${bgStyle}`)}
+                    >
+                      💾 Download Cutout
+                    </button>
+                  )}
+                </div>
+
+                <div className="preview-viewport checkerboard-bg">
+                  {finalResultUrl ? (
+                    <img src={finalResultUrl} alt="AI Result Preview" />
+                  ) : (
+                    <div className="loading-placeholder">Processing AI Cutout...</div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Footer Action */}
+            <div className="editor-footer">
+              <button className="btn btn-outline" onClick={handleReset}>
+                🔄 Start Over with New Image
+              </button>
             </div>
           </div>
         )}
       </main>
-
-      <footer className="footer">
-        <div className="footer-content">
-          <span>
-            Client-Side Processing • Active Model: {MODEL_CONFIGS[selectedModel]?.name}{' '}
-            {cachedModels[selectedModel] ? '(💾 Local)' : '(☁️ Cloud)'}
-          </span>
-        </div>
-      </footer>
     </div>
   );
 }
+
 export default App;
